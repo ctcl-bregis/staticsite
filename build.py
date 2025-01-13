@@ -2,7 +2,7 @@
 # File: build.py
 # Purpose: Read configuration file and build static site
 # Created: December 16, 2024
-# Modified: January 02, 2025
+# Modified: January 13, 2025
 
 import os
 import json
