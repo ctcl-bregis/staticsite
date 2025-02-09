@@ -1,5 +1,5 @@
-jinja2
+lysine
 pydantic
 markdown2
 minify-html
-PIL
+pillow

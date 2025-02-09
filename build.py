@@ -1,8 +1,8 @@
 # StaticSite
 # File: build.py
-# Purpose: Read configuration file and build static site
+# Purpose: Read configuration file and build static website
 # Created: December 16, 2024
-# Modified: January 13, 2025
+# Modified: February 09, 2025
 
 import os
 import json
@@ -68,6 +68,7 @@ class Page(BaseModel):
     desc: str
     icon: str
     icontitle: Union[str, None] = None
+    scripts: List[str] = None
     content: Dict[str, Annotated[Union[PageSectionContent, PageSectionLinklist], Field(discriminator="type")]]
 
 class Theme(BaseModel):
@@ -127,6 +128,9 @@ parser.add_argument("-l", "--loglevel", choices = ["info", "debug", "warning", "
 parser.add_argument("-e", "--skiperrors", help = "Skip errors", type = bool, default = True)
 parser.add_argument("--minify-html", help = "Minify HTML", action = "store_true")
 parser.add_argument("--minify-css", help = "Minify CSS", action = "store_true")
+parser.add_argument("--drawio", help = "Use drawio to convert .drawio to a specified format if installed", action = "store_true")
+parser.add_argument("--drawio-fmt", help = "Target drawio export format", choices = ["jpg", "png", "webp", "svg"], default = "png")
+parser.add_argument("--drawio-scale", help = "Scale of drawio export", type = int, default = 1)
 parser.add_argument("--thumb", help = "Generate thumbnails", action = "store_true")
 parser.add_argument("--thumb-size", help = "Max thumbnail height", type = int, default = 720)
 parser.add_argument("--thumb-algo", help = "Thumbnail resize algorithm", choices = ["nearest", "lanczos", "bilinear", "bicubic", "box", "hamming"], default = "box")
@@ -164,10 +168,6 @@ elif loglevel == "fatal":
     logger.setLevel(logging.FATAL)
 
 skiperrors = args.skiperrors
-minifyhtml = args.minify_html
-minifycss = args.minify_css
-thumbnails = args.thumb
-print(thumbnails)
 thumbsize = args.thumb_size
 
 thumbalgo = args.thumb_algo
@@ -256,17 +256,24 @@ logger.info(f"{len(pageconfigs)} pages found")
 for pagepath, pageconfig in pageconfigs.items():
     pagetemplate = templates[siteconfig.themes[pageconfig.theme].templates].get_template("main.lis")
     pagehtml = pagetemplate.render(page = pageconfig, pages = pageconfigs)
-    if pagepath != "/":
+    if pagepath != "/" and not os.path.exists(os.path.join(outdir, pagepath.removeprefix("/"))):
         os.makedirs(os.path.join(outdir, pagepath.removeprefix("/")))
 
-    if minifyhtml:
+    if args.minify_html:
         pagehtml = minify_html.minify(pagehtml)
 
     with open(outdir + pagepath + "index.html", "w") as f:
         f.write(pagehtml)
 
 # Copy static files
+if os.path.exists(os.path.join(outdir, "static")):
+    shutil.rmtree(os.path.join(outdir, "static"))
 shutil.copytree(os.path.join(cfgdir, "static"), os.path.join(outdir, "static"))
+
+# Copy robots.txt
+if os.path.exists(os.path.join(outdir, "robots.txt")):
+    os.remove(os.path.join(outdir, "robots.txt"))
+shutil.copy(os.path.join(cfgdir, "robots.txt"), os.path.join(outdir, "robots.txt"))
 
 pages = [x for x in os.walk(os.path.join(cfgdir, "pages"))]
 for page in pages:
@@ -277,7 +284,7 @@ for page in pages:
                 os.makedirs(os.path.join(outdir, "static/pages", pageurl))
             shutil.copy(os.path.join(page[0], f), os.path.join(outdir, "static/pages", pageurl, f))
 
-if thumbnails:
+if args.thumb:
     staticdirs = [x for x in os.walk(os.path.join(outdir, "static/pages"))]
     for dirs in staticdirs:
         for f in dirs[2]:
@@ -299,6 +306,21 @@ if thumbnails:
 
             img.save(os.path.join(dirs[0], f"{nosuffix}_thumb{suffix}"))
 
+if args.drawio:
+    staticdirs = [x for x in os.walk(os.path.join(outdir, "static/pages"))]
+    for dirs in staticdirs:
+        for f in dirs[2]:
+            suffix = pathlib.Path(f).suffix
+            nosuffix = pathlib.Path(f).stem
+
+            if siteconfig.staticexts[suffix] != "drawio":
+                continue
+
+            imgpath = os.path.join(dirs[0], f)
+
+            logger.debug(f"Converting {imgpath}")
+            os.system(f"drawio -x -o {dirs[0]}/ -f {args.drawio_fmt} -s {args.drawio_scale} {imgpath} -b 8 -s 2")
+
 # Render styles
 for templatedir in [x for x in os.listdir(os.path.join(cfgdir, "templates"))]:
     templates[templatedir] = Environment(
@@ -318,7 +340,7 @@ for name, theme in siteconfig.themes.items():
     template = templates[theme.templates].get_template("main.lis")
     css = template.render(theme = theme, themes = siteconfig.themes)
 
-    if minifycss:
+    if args.minify_css:
         css = minify_html.minify(css)
 
     with open(themepath, "w") as f:
