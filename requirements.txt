@@ -1,5 +1,6 @@
 lysine
 pydantic
-markdown2
+Markdown
+markupsafe
 minify-html
 pillow

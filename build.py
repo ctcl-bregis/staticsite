@@ -2,12 +2,12 @@
 # File: build.py
 # Purpose: Read configuration file and build static website
 # Created: December 16, 2024
-# Modified: February 09, 2025
+# Modified: May 17, 2025
 
 import os
 import json
 import logging
-import markdown2
+import markdown
 import minify_html
 import pathlib
 import shutil
@@ -20,103 +20,55 @@ from typing import Any, Union, Literal, Annotated, Dict, List
 from lysine import Environment, FileSystemLoader, select_autoescape
 from PIL import Image
 
-class LinkCustomTitle(BaseModel):
-    type: Literal["titleonlycustom"]
-    title: str
-    theme: str
-    link: str
-
-class LinkTitle(BaseModel):
-    type: Literal["titleonly"]
-    page: str
-
-# This is here to for compatibility with the old configuration format
-class LinkTitleText(BaseModel):
-    type: Literal["titletext"]
-    text: str
-
-class LinkFull(BaseModel):
-    type: Literal["full"]
-    page: str
-
-class PageSectionLinklist(BaseModel):
-    type: Literal["linklist"]
-    title: str
-    links: List[Annotated[Union[LinkCustomTitle, LinkTitle, LinkTitleText, LinkFull], Field(discriminator="type")]]
-    # Following fields are for compatibility with the old configuration format
-    # These may be removed soon
-    boxed: bool
-    fitscreen: bool
-
-class PageSectionContent(BaseModel):
-    type: Literal["content"]
-    title: str
-    content: str
-    theme: str
-    # Following fields are for compatibility with the old configuration format
-    # These may be removed soon
-    boxed: bool
-    fitscreen: bool
-
 class Page(BaseModel):
+    # Page title displayed in <title> and other places
     title: str
+    # Page theme
     theme: str
+    # Optional: specify a template to override the default HTML template in a given theme (main.lis)
+    htmloverride: str = "main.lis"
+    # Optional: specify a template to override the default CSS template in a given theme (main.lis)
+    cssoverride: str = "main.lis"
+    # Optional: starting date of the page
     startdate: Union[str, None] = None
+    # Optional: ending date of the page, e.g. not used for blogs
     enddate: Union[str, None] = None
-    dateprecision: Literal["year", "day"] = "year"
-    date: SkipValidation[str] = None
+    # Page description
     desc: str
-    icon: str
-    icontitle: Union[str, None] = None
-    scripts: List[str] = None
-    content: Dict[str, Annotated[Union[PageSectionContent, PageSectionLinklist], Field(discriminator="type")]]
-
-class Theme(BaseModel):
-    dispname: str
-    color: str
-    fgcolor: str
-    templates: str
-    enabled: bool = Field(default = True)
-
-    def __hash__(self):
-        return hash((self.dispname, self.color, self.fgcolor, self.templates, self.enabled))
+    # Optional: list of scripts to include in the page
+    scripts: List[str] = []
+    # Point to a markdown file to render
+    content: str
 
 class SiteConfig(BaseModel):
     sitedomain: str
+    # Minify HTML
+    minifyhtml: bool = True
+    # Minify CSS
+    minifycss: bool = True
+    # Generate images from .drawio files
+    drawio: bool = True
+    # Export file format
+    drawiofmt: Literal["svg", "png", "jpg", "webp"] = "png"
+    # Export image scale (bitmap formats only)
+    drawioscale: int = 1
+    # Enable thumbnailing
+    thumbnails: bool = True
+    # Thumbnail size
+    thumbsize: int = 600
+    # Thumbnail resize algorithm
+    thumbalgo: Literal["nearest", "lanczos", "bilinear", "bicubic", "box", "hamming"] = "nearest"
+    # Generate sitemap.xml
+    sitemap: bool = True
+    # Date formats to use in page buttons
     dateformats: Dict[str, str]
     # TODO: Value str should be an enum
     staticexts: Dict[str, str]
-    themes: Dict[str, Theme]
-    #templatevars: Dict[str, Any]
-
-def getdaterange(pageconfig: Page):
-    if pageconfig.startdate:
-        startdate = datetime.fromisoformat(pageconfig.startdate)
-    else:
-        startdate = None
-
-    if pageconfig.enddate:
-        enddate = datetime.fromisoformat(pageconfig.enddate)
-    else:
-        enddate = None
-
-    if not startdate and not enddate:
-        return
-
-    if startdate and not enddate:
-        if pageconfig.dateprecision == "year":
-            return str(startdate.strftime(siteconfig.dateformats["year"])) + " - Present"
-        elif pageconfig.dateprecision == "day":
-            return str(startdate.strftime(siteconfig.dateformats["day"])) + " - Present"
-
-    if pageconfig.dateprecision == "year" and startdate.year == enddate.year:
-        return str(startdate.year)
-
-    if pageconfig.dateprecision == "day" and startdate.year == enddate.year and startdate.month == enddate.month and startdate.day == enddate.day:
-        return str(startdate.strftime(siteconfig.dateformats["day"]))
+    # Theme name: template directory
+    themes: Dict[str, str]
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.FATAL)
+logger.setLevel(logging.CRITICAL)
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(handler)
@@ -126,17 +78,19 @@ parser.add_argument("configdir", help = "Configuration (input) directory", type 
 parser.add_argument("outputdir", help = "Output directory", type = str)
 parser.add_argument("-l", "--loglevel", choices = ["info", "debug", "warning", "error", "fatal"], default = "info", help = "Verbosity level")
 parser.add_argument("-e", "--skiperrors", help = "Skip errors", type = bool, default = True)
-parser.add_argument("--minify-html", help = "Minify HTML", action = "store_true")
-parser.add_argument("--minify-css", help = "Minify CSS", action = "store_true")
-parser.add_argument("--drawio", help = "Use drawio to convert .drawio to a specified format if installed", action = "store_true")
-parser.add_argument("--drawio-fmt", help = "Target drawio export format", choices = ["jpg", "png", "webp", "svg"], default = "png")
-parser.add_argument("--drawio-scale", help = "Scale of drawio export", type = int, default = 1)
-parser.add_argument("--thumb", help = "Generate thumbnails", action = "store_true")
-parser.add_argument("--thumb-size", help = "Max thumbnail height", type = int, default = 720)
-parser.add_argument("--thumb-algo", help = "Thumbnail resize algorithm", choices = ["nearest", "lanczos", "bilinear", "bicubic", "box", "hamming"], default = "box")
 
 args = parser.parse_args()
 cfgdir = args.configdir
+
+try:
+    with open(cfgdir + "/config.json", "r") as f:
+        configjson = f.read()
+    siteconfigdata = json.loads(configjson)
+    siteconfig: SiteConfig = SiteConfig(**siteconfigdata)
+except Exception as e:
+    logger.fatal(f"Could not read config.json {e}")
+    exit(1)
+
 if not os.path.exists(cfgdir):
     logger.fatal(f"Configuration directory {cfgdir} does not exist")
     exit(1)
@@ -165,129 +119,58 @@ elif loglevel == "error":
 elif loglevel == "critical":
     logger.setLevel(logging.CRITICAL)
 elif loglevel == "fatal":
-    logger.setLevel(logging.FATAL)
+    logger.setLevel(logging.CRITICAL)
 
 skiperrors = args.skiperrors
-thumbsize = args.thumb_size
+thumbsize = siteconfig.thumbsize
 
-thumbalgo = args.thumb_algo
-if thumbalgo == "nearest":
+thumbalgocfg = siteconfig.thumbalgo
+if thumbalgocfg == "nearest":
     thumbalgo = Image.Resampling.NEAREST
-elif thumbalgo == "lanczos":
+elif thumbalgocfg == "lanczos":
     thumbalgo = Image.Resampling.LANCZOS
-elif thumbalgo == "bilinear":
+elif thumbalgocfg == "bilinear":
     thumbalgo = Image.Resampling.BILINEAR
-elif thumbalgo == "bicubic":
+elif thumbalgocfg == "bicubic":
     thumbalgo = Image.Resampling.BICUBIC
-elif thumbalgo == "box":
+elif thumbalgocfg == "box":
     thumbalgo = Image.Resampling.BOX
-elif thumbalgo == "hamming":
+elif thumbalgocfg == "hamming":
     thumbalgo = Image.Resampling.HAMMING
 
 configjsonpath = pathlib.Path(cfgdir) / "config.json"
+def findpages() -> Dict[str, Page]:
+    pages: Dict[str, Page] = {}
 
-try:
-    with open(configjsonpath, "r") as f:
-        configjson = f.read()
-    siteconfig = json.loads(configjson)
-    siteconfig = SiteConfig(**siteconfig)
-except Exception as e:
-    logger.fatal(f"Could not read config.json {e}")
-    exit(1)
-
-# Render pages
-templates = {}
-for templatedir in [x for x in os.listdir(os.path.join(cfgdir, "templates"))]:
-    templates[templatedir] = Environment(
-        loader = FileSystemLoader(os.path.join(cfgdir, "templates", templatedir, "html")),
-        autoescape = select_autoescape()
-    )
-
-pages = [x[0] for x in os.walk(os.path.join(cfgdir, "pages"))]
-pageconfigs = {}
-for page in pages:
-    # This variable is to store the absolute path of the page, without the path to the configuration directory
-    pageurl = page.removeprefix(cfgdir + "/pages") + "/"
-
-    if os.path.exists(os.path.join(page, ".ignore")):
-        logger.info(f"Directory {page} contains .ignore, skipping")
-        continue
-
-    if not os.path.exists(os.path.join(page, "page.json")):
-        logger.error(f"Directory {page} does not contain page.json, skipping")
-        continue
-
-    pagejsonpath = os.path.join(page, "page.json")
-    with open(pagejsonpath, "r") as f:
-        pagejson = f.read()
-        try:
-            pageconfigjson = json.loads(pagejson)
-        except Exception as e:
-            logger.error(f"Could not parse {pagejsonpath} {e}")
-            if not skiperrors:
-                exit(1)
-            else:
-                continue
-
-    pageconfig = Page(**pageconfigjson)
-
-    pageconfig.date = getdaterange(pageconfig)
-
-    for content in pageconfig.content.keys():
-        if not pageconfig.content[content].type == "content":
+    for pagedir in os.walk(os.path.join(cfgdir, "pages")):
+        if ".ignore" in pagedir[2]:
+            logger.debug(f".ignore found in {pagedir[0]}, skipping")
             continue
 
-        sectionmdpath = f"{page}/{pageconfig.content[content].content}"
-        if not os.path.exists(sectionmdpath):
-            logger.error(f"{sectionmdpath} does not exist")
-            if not skiperrors:
-                exit(1)
-            pageconfig.content[content].content = ""
-        else:
-            logger.debug(f"Processing {sectionmdpath}")
-            with open(f"{page}/{pageconfig.content[content].content}") as f:
-                sectioncontent = f.read()
-            pageconfig.content[content].content = markdown2.markdown(sectioncontent)
+        if not "page.json" in pagedir[2]:
+            logger.warn(f"page.json not found in {pagedir[0]}, skipping")
+            continue
 
-    pageconfigs[pageurl] = pageconfig
+        with open(os.path.join(pagedir[0], "page.json"), "r") as f:
+            pagejsonraw = f.read()
 
-logger.info(f"{len(pageconfigs)} pages found")
+            try:
+                pagejson: Dict = json.loads(pagejsonraw)
+                page: Page = Page(**pagejson)
+            except Exception as e:
+                logger.error(f"Could not parse page.json in {pagedir[0]}: {e}")
+                continue
 
-for pagepath, pageconfig in pageconfigs.items():
-    pagetemplate = templates[siteconfig.themes[pageconfig.theme].templates].get_template("main.lis")
-    pagehtml = pagetemplate.render(page = pageconfig, pages = pageconfigs)
-    if pagepath != "/" and not os.path.exists(os.path.join(outdir, pagepath.removeprefix("/"))):
-        os.makedirs(os.path.join(outdir, pagepath.removeprefix("/")))
+    return pages
 
-    if args.minify_html:
-        pagehtml = minify_html.minify(pagehtml)
+def buildpages(pages: Dict[str, Page]):
+    for page in pages.keys():
+        logger.info(f"Building page {page}")
 
-    with open(outdir + pagepath + "index.html", "w") as f:
-        f.write(pagehtml)
-
-# Copy static files
-if os.path.exists(os.path.join(outdir, "static")):
-    shutil.rmtree(os.path.join(outdir, "static"))
-shutil.copytree(os.path.join(cfgdir, "static"), os.path.join(outdir, "static"))
-
-# Copy robots.txt
-if os.path.exists(os.path.join(outdir, "robots.txt")):
-    os.remove(os.path.join(outdir, "robots.txt"))
-shutil.copy(os.path.join(cfgdir, "robots.txt"), os.path.join(outdir, "robots.txt"))
-
-pages = [x for x in os.walk(os.path.join(cfgdir, "pages"))]
-for page in pages:
-    for f in page[2]:
-        if pathlib.Path(f).suffix in siteconfig.staticexts:
-            pageurl = page[0].removeprefix(cfgdir + "/pages/") + "/"
-            if not os.path.exists(os.path.join(outdir, "static/pages", pageurl)):
-                os.makedirs(os.path.join(outdir, "static/pages", pageurl))
-            shutil.copy(os.path.join(page[0], f), os.path.join(outdir, "static/pages", pageurl, f))
-
-if args.thumb:
-    staticdirs = [x for x in os.walk(os.path.join(outdir, "static/pages"))]
-    for dirs in staticdirs:
-        for f in dirs[2]:
+# Only thumbnail images from pages that were registered
+def thumbnails(pages: Dict[str, Page]):
+    for page in pages.keys():
+        for files in os.listdir():
             suffix = pathlib.Path(f).suffix
             nosuffix = pathlib.Path(f).stem
 
@@ -306,7 +189,8 @@ if args.thumb:
 
             img.save(os.path.join(dirs[0], f"{nosuffix}_thumb{suffix}"))
 
-if args.drawio:
+
+def drawio():
     staticdirs = [x for x in os.walk(os.path.join(outdir, "static/pages"))]
     for dirs in staticdirs:
         for f in dirs[2]:
@@ -319,29 +203,71 @@ if args.drawio:
             imgpath = os.path.join(dirs[0], f)
 
             logger.debug(f"Converting {imgpath}")
-            os.system(f"drawio -x -o {dirs[0]}/ -f {args.drawio_fmt} -s {args.drawio_scale} {imgpath} -b 8 -s 2")
+            # TODO: Add Windows support if it is ever needed
+            stat = os.system(f"drawio -x -o {dirs[0]}/ -f {siteconfig.drawiofmt} -s {siteconfig.drawioscale} {imgpath} -b 8 -s 2 1>/dev/null 2>/dev/null")
+            if stat != 0:
+                logger.error(f"Error converting {imgpath}")
+                continue
 
-# Render styles
-for templatedir in [x for x in os.listdir(os.path.join(cfgdir, "templates"))]:
-    templates[templatedir] = Environment(
-        loader = FileSystemLoader(os.path.join(cfgdir, "templates", templatedir, "css")),
-        autoescape = select_autoescape()
-    )
 
-os.makedirs(os.path.join(outdir, "static/styles"))
+def buildcss():
+    templates: Dict[str, Environment] = {}
+    for templatedir in [x for x in os.listdir(os.path.join(cfgdir, "templates"))]:
+        templates[templatedir] = Environment(
+            loader = FileSystemLoader(os.path.join(cfgdir, "templates", templatedir, "css")),
+            autoescape = select_autoescape()
+        )
 
-for name, theme in siteconfig.themes.items():
-    themepath = os.path.join(outdir, f"static/styles/{name}.css")
+    os.makedirs(os.path.join(outdir, "static/styles"))
 
-    if not theme.enabled:
-        logger.info(f"Theme \"{theme.dispname}\" ({name}) is disabled in config, skipping")
-        continue
+    for name, theme in siteconfig.themes.items():
+        themepath = os.path.join(outdir, f"static/styles/{name}.css")
 
-    template = templates[theme.templates].get_template("main.lis")
-    css = template.render(theme = theme, themes = siteconfig.themes)
+        template = templates[theme].get_template("main.lis")
+        css = template.render(theme = theme, themes = siteconfig.themes)
 
-    if args.minify_css:
-        css = minify_html.minify(css)
+        if siteconfig.minifycss:
+            css = minify_html.minify(css)
 
-    with open(themepath, "w") as f:
-        f.write(css)
+        with open(themepath, "w") as f:
+            f.write(css)
+
+def sitemap(pages: Dict[str, Page]):
+    sitemap_urls = []
+    for pagepath, pageconfig in pages.items():
+        sitemap_urls.append(f"<url><loc>https://{siteconfig.sitedomain}{pagepath}</loc></url>\n")
+
+    sitemap = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    {}</urlset>""".format("".join(sitemap_urls))
+
+    with open(os.path.join(outdir, "sitemap.xml"), "w") as f:
+        f.write(sitemap)
+
+
+if __name__ == "__main__":
+    pages: Dict[str, Page] = findpages()
+
+    buildpages(pages)
+
+    if siteconfig.thumbnails:
+        thumbnails(pages)
+
+    if siteconfig.drawio:
+        drawio()
+
+    buildcss()
+
+    if siteconfig.sitemap:
+        sitemap(pages)
+
+    # Copy static files
+    if os.path.exists(os.path.join(outdir, "static")):
+        shutil.rmtree(os.path.join(outdir, "static"))
+    shutil.copytree(os.path.join(cfgdir, "static"), os.path.join(outdir, "static"))
+
+    # Copy robots.txt
+    if os.path.exists(os.path.join(outdir, "robots.txt")):
+        os.remove(os.path.join(outdir, "robots.txt"))
+    shutil.copy(os.path.join(cfgdir, "robots.txt"), os.path.join(outdir, "robots.txt"))
+

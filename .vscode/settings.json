@@ -2,5 +2,6 @@
     "psi-header.variables": [
         ["projectCreationYear", "2024"]
     ],
-    "liveServer.settings.multiRootWorkspaceName": "staticsite"
+    "liveServer.settings.multiRootWorkspaceName": "staticsite",
+    "search.useIgnoreFiles": true
 }
